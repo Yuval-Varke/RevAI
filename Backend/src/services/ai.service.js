@@ -1,9 +1,34 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_GEMINI_KEY);
-const model = genAI.getGenerativeModel({
-    model: "gemini-2.0-flash",
-    systemInstruction: `
+// Candidate models to try. First element is highest priority.
+const defaultModels = [
+    "gemini-2.5-flash",         // Latest 2.5 Flash (best performance)
+    "gemini-2.0-flash-lite",    // Lighter 2.0 version (better quota)
+    "gemini-flash-latest",      // Latest flash model alias
+    "gemini-2.0-flash",         // Standard 2.0 Flash
+    "gemini-pro-latest"         // Latest pro model
+];
+
+const apiKey = process.env.GOOGLE_GEMINI_KEY;
+
+if (!apiKey) {
+    throw new Error("GOOGLE_GEMINI_KEY is not set in the environment.");
+}
+
+// Build model preference list: env override first, then defaults (deduped)
+const modelPreferences = (() => {
+    const envModel = process.env.GOOGLE_GEMINI_MODEL;
+    if (!envModel) return defaultModels;
+    const set = new Set([envModel, ...defaultModels]);
+    return Array.from(set);
+})();
+
+const genAI = new GoogleGenerativeAI(apiKey);
+
+function buildModel(modelName) {
+    return genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: `
                 Here’s a solid system instruction for your AI code reviewer:
 
                 AI System Instruction: Senior Code Reviewer (7+ Years of Experience)
@@ -77,15 +102,43 @@ const model = genAI.getGenerativeModel({
 
                 Would you like any adjustments based on your specific needs? 🚀 
     `
-});
+    });
+}
 
 
 async function generateContent(prompt) {
-    const result = await model.generateContent(prompt);
+    let lastError;
 
-    console.log(result.response.text())
+    for (const modelName of modelPreferences) {
+        try {
+            console.log(`Using Gemini model: ${modelName}`);
+            const model = buildModel(modelName);
+            const result = await model.generateContent(prompt);
+            const text = result.response.text();
+            return text;
+        } catch (err) {
+            lastError = err;
+            console.error(`Gemini generateContent failed for ${modelName}`, err);
+            // If model is not found or quota is exceeded, try next candidate.
+            if (err?.status === 404 || err?.status === 429) {
+                continue;
+            }
+            // For other errors, abort early.
+            break;
+        }
+    }
 
-    return result.response.text();
+    // If we exhausted candidates, throw with guidance.
+    const tried = modelPreferences.join(", ");
+    let hint = "";
+    if (lastError?.status === 404) {
+        hint = `All tried models returned 404. Set GOOGLE_GEMINI_MODEL to a supported model (e.g. gemini-1.5-flash-8b or gemini-2.0-flash) and restart.`;
+    } else if (lastError?.status === 429) {
+        hint = `Quota exceeded. Enable billing or request quota for your project, or try a lighter model like gemini-1.5-flash-8b.`;
+    }
+    const error = lastError || new Error("Failed to generate content");
+    error.message = `${error.message}${hint ? " | " + hint : ""} | Tried: ${tried}`;
+    throw error;
 
 }
 
